@@ -1,4 +1,4 @@
-# Fieldcraft 0.1.0
+# Fieldcraft 0.2.0
 
 Signed distance fields from a raymarcher, out the other end as Minecraft
 Bedrock structures.
@@ -38,12 +38,12 @@ engine/
     nbt.js                  little-endian NBT read/write
     mcstructure.js          .mcstructure writer
     split.js                aligned chunking + placement guide
-    zip.js                  store-method ZIP
+    zip.js                  ZIP writer, stored or deflated
     mcpack.js               behaviour pack wrapper
 host/fieldcraft-export.js   drop-in export hook for host programs
 tools/validate.mjs          the gates
 tools/glrender.py           headless GL runner used by gate 6
-examples/*.fieldbundle.json
+examples/*.fieldbundle.json including one exported from a real Catoptron stack
 ```
 
 ## Pipeline
@@ -55,8 +55,7 @@ examples/*.fieldbundle.json
 2. **Voxelise.** Slabs scatter into the sparse map as they arrive, so a 512³
    volume never exists in memory at once. Solid mode keeps everything inside;
    shell mode keeps cells whose depth is under the thickness. Depth living in
-   the alpha channel is what lets shell thickness change meaning without
-   re-deriving it from geometry.
+   the alpha channel is what lets shell thickness change without re-sampling.
 3. **Mesh.** Merged face-culled quads for the preview.
 4. **Export.** `.mcstructure`, or a `.mcpack` behaviour pack. Anything over the
    practical size splits into aligned chunks with a placement guide.
@@ -83,35 +82,37 @@ python3 -m http.server 8080
 node tools/validate.mjs
 ```
 
-60 checks across six gates:
+69 checks across seven gates:
 
-1. **Bundle contract** — parsing, splicing, and 17 specific refusals.
-2. **Shader assembly** — structure, plus real compilation through
+1. **Bundle contract** — parsing, splicing, and the refusals.
+2. **Slicing a host's assembled shader** — every uniform declaration shape that
+   turned up in Catoptron 3D, plus the leftover guard.
+3. **Shader assembly** — structure, plus real compilation through
    `glslangValidator` when it is on PATH, including a canary that references an
    undeclared uniform. If the canary ever compiles, the gate is broken.
-3. **Tiling** — atlas layout, and slab scatter checked against index arithmetic
+4. **Tiling** — atlas layout, and slab scatter checked against index arithmetic
    written from scratch rather than reusing the encoder's.
-4. **Voxelisation** — sphere volume against the analytic value, and the Menger
+5. **Voxelisation** — sphere volume against the analytic value, and the Menger
    sponge against its exact combinatorial cell count of 20^k on a 3^k grid.
-5. **blockcore** — key round-trips, budget truncation, mesh surface area,
+6. **blockcore** — key round-trips, budget truncation, mesh surface area,
    outward winding by signed volume, `.mcstructure` round-trip including index
-   ordering and palette interning, splitting losslessness, ZIP CRCs, and the
-   `.mcpack` opened by an independent reader.
-6. **Real GL** — the actual sampling shader rendered headlessly through
+   ordering and palette interning, splitting losslessness, ZIP CRCs, deflate,
+   and the `.mcpack` opened by an independent reader.
+7. **Real GL** — the actual sampling shader rendered headlessly through
    Mesa/EGL and compared to the CPU oracles cell by cell.
 
-Gates 2 and 6 skip with a notice when their tooling is absent:
+Gates 3 and 7 skip with a notice when their tooling is absent:
 
 ```
 apt-get install glslang-tools libegl1 libgl1-mesa-dri
 pip install moderngl
 ```
 
-Gate 6 earned its place immediately. The Menger fold shipped with
+The GL gate earned its place immediately. The Menger fold shipped with
 `p * 3.0 - vec3(2.0, 2.0, 0.0)` instead of `vec3(2.0)`, which builds a different
-solid — 12 cells at level 1 where the sponge has 20. Gate 4 could not see it,
-because it feeds the membership oracle in directly and never touches GLSL. The
-only thing that catches a wrong estimator is running the estimator.
+solid — 12 cells at level 1 where the sponge has 20. The CPU gate could not see
+it, because it feeds the membership oracle in directly and never touches GLSL.
+The only thing that catches a wrong estimator is running the estimator.
 
 Every gate has been checked for teeth by sabotage: flipped mesher winding,
 swapped tile row and column, z-major structure indexing, corrupted ZIP CRCs, a
@@ -133,6 +134,13 @@ defaults to 64³ chunks aligned to a fixed lattice, so pieces butt up exactly
 whatever the overall bounds are, and the placement guide lists every offset with
 a ready-to-paste `/structure load` line.
 
+The format stores one index per cell of the bounding box, with no run-length
+encoding, so a sparse sculpture is mostly the -1 that means "no block": a
+192³ build weighs 56 MB as raw structures whatever it actually contains. The
+pack writer therefore deflates through the platform's own `CompressionStream`,
+which takes that 56 MB to 131 KB. There is no dependency involved; it falls back
+to storing where the API is missing.
+
 Two values I could not verify and left configurable rather than guessed:
 
 * The packed block `version` int in each palette entry defaults to 1.21.0.0
@@ -143,7 +151,34 @@ Two values I could not verify and left configurable rather than guessed:
 
 Block names default to the flattened form (`minecraft:white_concrete`), with the
 pre-flattening form (`minecraft:concrete` plus a `color` state) available from
-the same dropdown in case your version wants it.
+the same dropdown.
+
+## Catoptron 3D
+
+Confirmed working against build 0.57.3, headlessly, end to end.
+
+* **Entry point:** `float mapT(vec3 p, out vec4 trap, out float safe)`. The
+  division by the accumulated scale happens inside `mapTinner`, where `s` is a
+  local, so `scaleParam` stays unset. `trapParam: "trap"` gives the orbit trap
+  to the material expression, which is what turns a grey solid into something
+  that reads. `map(vec3 p)` also works if you do not want the trap.
+* **The export is a string slice.** `bundleFromProgram` cuts the assembled
+  fragment shader at `void main(`, which is the same cut `tools/validate.py`
+  already makes for the DE gate, strips the stage declarations, and reads the
+  uniform values back off the live program.
+* **95 of 97 uniforms travel.** The two that cannot are `sampler2D uImg` and
+  `sampler3D uSdf`; the first is render-side only, the second means the flame
+  voxel mode cannot be exported as a bundle, since its field *is* a texture.
+* **Fold parameters live in the per-slot bank uniforms** (`uP0_0`, `uO0`, `uR0`),
+  not in the baked source, which is exactly why reading them off the live
+  program matters. With them at zero the box fold has limit zero, space
+  collapses to the origin, and the volume comes back empty.
+
+Measured on the factory "Folded frames" preset — octahedral fold 0.42, box fold
+1.0, 8 iterations, box-frame primitive, box ±2 — at 192³ through llvmpipe:
+75,656 cells in 1.1 s, six materials off the orbit trap, 298,678 merged quads
+from 300,552 exposed faces, 27 pieces, 131 KB pack. The bundle ships as
+`examples/catoptron-folded-frames.fieldbundle.json`.
 
 ## Out of scope for now
 
@@ -151,10 +186,3 @@ Colour-space palette matching and the stair/slab surface detailer. Both are
 later passes over blockcore rather than changes to Fieldcraft, which is why the
 palette sits behind a single `blockFor()` call and the shade byte is already
 carried through the voxel value unused.
-
-## Next
-
-Catoptron 3D gets the export hook first — its DE-contract architecture already
-isolates fields behind a known signature. The bundle format reads that signature
-verbatim rather than imposing one, so wiring it up is a matter of handing
-`makeFieldBundle` the assembled source and the real signature string.

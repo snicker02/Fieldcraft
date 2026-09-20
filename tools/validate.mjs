@@ -22,13 +22,15 @@ import {
 } from '../engine/bundle.js';
 import { SPHERE_BUNDLE, MENGER_BUNDLE, loadTestBundle, mengerContains, sphereContains } from '../engine/testfields.js';
 import { buildFragmentSource, VERTEX_SOURCE } from '../engine/sampler.js';
-import { makeFieldBundle } from '../host/fieldcraft-export.js';
+import {
+  makeFieldBundle, fieldFromShaderSource, bundleFromProgram,
+} from '../host/fieldcraft-export.js';
 import { computeAtlasLayout, voxelizeSlab, encodeSliceCPU, MODE } from '../engine/voxelize.js';
 import {
   VoxelGrid, packKey, unpackKey, packValue, valueMaterial, valueShade,
   AXIS_MIN, AXIS_MAX, BlockPalette, meshGrid, countExposedFaces,
-  buildMcStructure, splitGrid, placementGuide, buildMcPack, ZipWriter,
-  crc32, writeNBT, readNBT, MATERIALS,
+  buildMcStructure, splitGrid, placementGuide, buildMcPack, buildMcPackAsync,
+  ZipWriter, crc32, writeNBT, readNBT, MATERIALS, deflateAvailable,
 } from '../engine/blockcore/index.js';
 
 // --- harness ---------------------------------------------------------------
@@ -182,6 +184,125 @@ gate('Gate 1 — field bundle contract', () => {
   });
 });
 
+// --- gate 1b: slicing a host's assembled shader ---------------------------
+
+// A cut-down stand-in for a real assembled fragment shader, carrying every
+// declaration shape that turned up in Catoptron 3D: trailing comments, comma
+// lists, precision-qualified samplers, and uniform arrays.
+const MOCK_ASSEMBLED = `#version 300 es
+precision highp float;
+out vec4 fragColor;
+
+#define PI 3.14159265359
+
+uniform vec2  uRes;
+uniform float uStepScale;   // safety multiplier - lower it when a bound op misbehaves
+uniform vec3  uPal0, uPal1, uPal2;
+uniform mat3  uFlameMi[24];
+uniform vec3  uFlameBLo[24];   // per-map image box
+uniform sampler2D uImg;
+uniform highp sampler3D uSdf;   // GLSL ES has no default precision for sampler3D
+uniform float uPrimSize;
+
+float prim(vec3 p){ return length(p) - uPrimSize; }
+
+float mapT(vec3 p, out vec4 trap, out float safe){
+  float s = 1.0;
+  trap = vec4(dot(p, p));
+  float d = prim(p) / s;
+  safe = d;
+  return d;
+}
+
+float map(vec3 p){ vec4 t; float sf; return mapT(p, t, sf); }
+
+void main(){ fragColor = vec4(map(vec3(0.0))); }
+`;
+
+gate("Gate 1b — slicing a host's assembled shader", () => {
+  check('every uniform declaration is carried, whatever its shape', () => {
+    const r = fieldFromShaderSource(MOCK_ASSEMBLED, {});
+    const names = r.uniforms.map(u => u.name);
+    assertEq(names, ['uRes', 'uStepScale', 'uPal0', 'uPal1', 'uPal2',
+      'uFlameMi', 'uFlameBLo', 'uPrimSize'], 'uniform names');
+    const arr = r.uniforms.find(u => u.name === 'uFlameMi');
+    assertEq(arr.count, 24, 'array count');
+    assertEq(arr.value.length, 9 * 24, 'array value length');
+    assertEq(r.droppedSamplers, ['sampler2D uImg', 'sampler3D uSdf'], 'samplers dropped');
+  });
+
+  check('a uniform with a trailing comment is not silently lost', () => {
+    // This is the real bug this gate exists for. A declaration the parser did
+    // not recognise stays in the source, compiles perfectly, and reads as zero
+    // forever: the picture comes out wrong rather than missing, which is the
+    // hardest kind of failure to trace back to its cause.
+    const r = fieldFromShaderSource(MOCK_ASSEMBLED, {});
+    assert(r.uniforms.some(u => u.name === 'uStepScale'),
+      'the commented declaration was dropped');
+    assert(!/\buniform\b/.test(r.source), 'a uniform declaration survived into the prelude');
+  });
+
+  check('an unparseable uniform declaration is refused, not ignored', () => {
+    const broken = MOCK_ASSEMBLED.replace('uniform float uPrimSize;', 'uniform float 9bad;');
+    assertThrows(() => fieldFromShaderSource(broken, {}),
+      /not understood|Cannot parse uniform/, 'malformed name');
+
+    // A declaration the parser cannot see at all — here an interposed block
+    // comment. This is what the leftover guard is for: without it the uniform
+    // would stay in the source, compile, and read as zero forever.
+    const wrapped = MOCK_ASSEMBLED.replace('uniform float uPrimSize;',
+      'uniform /* why not */ float uPrimSize;');
+    assertThrows(() => fieldFromShaderSource(wrapped, {}), /not understood/, 'leftover guard');
+
+    // Whereas a declaration merely split across lines is understood, not refused.
+    const split = MOCK_ASSEMBLED.replace('uniform float uPrimSize;', 'uniform\n  float uPrimSize;');
+    assert(fieldFromShaderSource(split, {}).uniforms.some(u => u.name === 'uPrimSize'),
+      'a wrapped declaration should still be read');
+  });
+
+  check('stage declarations are stripped and values are filled in', () => {
+    const r = fieldFromShaderSource(MOCK_ASSEMBLED, { values: { uPrimSize: 0.42, uPal0: [1, 2, 3] } });
+    assert(!/#version/.test(r.source), '#version survived');
+    assert(!/precision\s+highp/.test(r.source), 'precision statement survived');
+    assert(!/out vec4 fragColor/.test(r.source), 'stage output survived');
+    assert(!/void main/.test(r.source), 'main survived the cut');
+    assertEq(r.uniforms.find(u => u.name === 'uPrimSize').value, 0.42, 'scalar value');
+    assertEq(r.uniforms.find(u => u.name === 'uPal0').value, [1, 2, 3], 'vector value');
+  });
+
+  check('the sliced field becomes a bundle that validates and assembles', () => {
+    const { bundle, droppedSamplers } = bundleFromProgram({
+      name: 'Mock host field',
+      shaderSource: MOCK_ASSEMBLED,
+      values: { uPrimSize: 0.8 },
+      deSignature: 'float mapT(vec3 p, out vec4 trap, out float safe)',
+      trapParam: 'trap',
+      materialSignature: 'int material(vec3 p, vec3 n, vec4 trap)',
+      materialSource: 'int material(vec3 p, vec3 n, vec4 trap){ return 2 + int(mod(trap.w, 6.0)); }',
+      bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+    });
+    assertEq(droppedSamplers.length, 2, 'samplers reported');
+    const b = validateBundle(structuredClone(bundle));
+    const src = buildFragmentSource(b).source;
+    assert(/uniform mat3 uFlameMi\[24\];/.test(src), 'array uniform re-emitted');
+    assert(/fcTrapOut = trap;/.test(src), 'trap wired through');
+    assert(/fcMaterial\(p, n, trap\)/.test(src), 'material receives the trap');
+  });
+
+  check('a material asking for a trap without one declared is refused', () => {
+    const b = structuredClone(MENGER_BUNDLE);
+    b.glsl.material.signature = 'int material(vec3 p, vec3 n, vec4 trap)';
+    b.glsl.material.source = 'int material(vec3 p, vec3 n, vec4 trap){ return 0; }';
+    assertThrows(() => validateBundle(b), /trapParam/, 'trap requirement');
+  });
+
+  check('array uniforms are validated on component count', () => {
+    const b = structuredClone(MENGER_BUNDLE);
+    b.uniforms.push({ name: 'uArr', type: 'vec3', count: 4, value: new Array(11).fill(0) });
+    assertThrows(() => validateBundle(b), /needs 12 component/, 'array arity');
+  });
+});
+
 // --- gate 2: shader assembly ----------------------------------------------
 
 function glslangAvailable() {
@@ -199,7 +320,8 @@ gate('Gate 2 — sampling shader assembly', () => {
       assert(r.source.startsWith('#version 300 es'), 'version header must lead');
       assertEq((r.source.match(/void main\(\)/g) || []).length, 1, 'exactly one main');
       assert(/float fcField\(vec3 p\)/.test(r.source), 'fcField wrapper missing');
-      assert(/int fcMaterial\(vec3 p, vec3 n\)/.test(r.source), 'fcMaterial wrapper missing');
+      assert(/int fcMaterial\(vec3 p, vec3 n, vec4 trap\)/.test(r.source), 'fcMaterial wrapper missing');
+      assert(/float fcFieldTrap\(vec3 p, out vec4 fcTrapOut\)/.test(r.source), 'fcFieldTrap wrapper missing');
       let depth = 0;
       for (const c of r.source) { if (c === '{') depth++; else if (c === '}') depth--; }
       assertEq(depth, 0, 'unbalanced braces in assembled source');
@@ -434,6 +556,17 @@ gate('Gate 4 — voxelisation against oracles', () => {
 });
 
 // --- gate 5: blockcore -----------------------------------------------------
+
+// Built with top-level await so the two checks below stay synchronous like the rest.
+const DEFLATE_FIXTURE = await (async () => {
+  if (!deflateAvailable()) return null;
+  const g = new VoxelGrid();
+  for (let i = 0; i < 64; i++) g.set(i, i, i, packValue(3, 0));
+  const s = buildMcStructure(g, {});
+  const z = new ZipWriter();
+  z.add('structures/ns/sparse.mcstructure', s.bytes);
+  return { raw: s.bytes, stored: z.build(), packed: await z.buildAsync() };
+})();
 
 gate('Gate 5 — blockcore', () => {
   check('packed keys round-trip across the full addressable range', () => {
@@ -740,6 +873,38 @@ gate('Gate 5 — blockcore', () => {
     assertEq(pack.manifest.modules[0].type, 'data', 'module type');
     globalThis.__packBytes = pack.bytes;
     globalThis.__structBytes = s.bytes;
+  });
+
+  check('deflate shrinks a sparse structure by orders of magnitude', () => {
+    // A sparse sculpture is mostly the -1 that means "no block", so this is the
+    // difference between a usable download and a 55 MB one.
+    if (!DEFLATE_FIXTURE) throw new Error('CompressionStream is unavailable here');
+    const { stored, packed } = DEFLATE_FIXTURE;
+    assert(packed.length * 20 < stored.length,
+      `expected a large saving, got ${stored.length} -> ${packed.length}`);
+  });
+
+  check('a deflated entry inflates correctly in an independent reader', () => {
+    if (!DEFLATE_FIXTURE) throw new Error('CompressionStream is unavailable here');
+    const dir = mkdtempSync(join(tmpdir(), 'fieldcraft-def-'));
+    const file = join(dir, 'd.zip');
+    writeFileSync(file, Buffer.from(DEFLATE_FIXTURE.packed));
+    let out;
+    try {
+      out = execFileSync('python3', ['-c', `
+import zipfile
+z = zipfile.ZipFile(${JSON.stringify(file)})
+assert z.testzip() is None
+i = z.getinfo('structures/ns/sparse.mcstructure')
+assert i.compress_type == zipfile.ZIP_DEFLATED, i.compress_type
+print(len(z.read('structures/ns/sparse.mcstructure')))
+`], { stdio: 'pipe' }).toString().trim();
+    } catch (e) {
+      throw new Error(`python zipfile rejected it: ${e.stderr ? e.stderr.toString() : e.message}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    assertEq(parseInt(out, 10), DEFLATE_FIXTURE.raw.length, 'inflated size');
   });
 
   check('.mcpack opens as a zip in an independent reader', () => {

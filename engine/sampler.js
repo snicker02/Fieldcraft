@@ -53,12 +53,13 @@ void main() {
   vec3 span = fcBoxMax - fcBoxMin;
   vec3 p = fcBoxMin + (vec3(c) + 0.5) / vec3(fcRes) * span;
 
-  float d = fcField(p) - fcIso;
+  vec4 trap;
+  float d = fcFieldTrap(p, trap) - fcIso;
   if (d > 0.0) { fcOut = vec4(0.0); return; }
 
   float cell = max(span.x / float(fcRes.x), max(span.y / float(fcRes.y), span.z / float(fcRes.z)));
   vec3 n = fcNormal(p);
-  int mid = fcMaterial(p, n);
+  int mid = fcMaterial(p, n, trap);
   float shade = clamp(dot(n, normalize(vec3(0.35, 0.86, 0.37))) * 0.5 + 0.5, 0.0, 1.0);
 
   fcOut = vec4(
@@ -185,6 +186,23 @@ export class FieldSampler {
     const loc = this._loc(u.name);
     if (loc === null) return; // optimised out
     const v = Array.isArray(u.value) ? u.value : [u.value];
+    if (u.count) {
+      const f = Float32Array.from(v);
+      switch (u.type) {
+        case 'bool': case 'int': gl.uniform1iv(loc, Int32Array.from(v)); return;
+        case 'float': gl.uniform1fv(loc, f); return;
+        case 'vec2': gl.uniform2fv(loc, f); return;
+        case 'vec3': gl.uniform3fv(loc, f); return;
+        case 'vec4': gl.uniform4fv(loc, f); return;
+        case 'ivec2': gl.uniform2iv(loc, Int32Array.from(v)); return;
+        case 'ivec3': gl.uniform3iv(loc, Int32Array.from(v)); return;
+        case 'ivec4': gl.uniform4iv(loc, Int32Array.from(v)); return;
+        case 'mat2': gl.uniformMatrix2fv(loc, false, f); return;
+        case 'mat3': gl.uniformMatrix3fv(loc, false, f); return;
+        case 'mat4': gl.uniformMatrix4fv(loc, false, f); return;
+        default: return;
+      }
+    }
     switch (u.type) {
       case 'bool': gl.uniform1i(loc, v[0] ? 1 : 0); break;
       case 'int': gl.uniform1i(loc, v[0] | 0); break;

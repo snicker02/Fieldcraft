@@ -153,6 +153,14 @@ export function validateBundle(raw) {
       throw new BundleError(`paramDefaults.${p.name} must be a GLSL expression string`, 'glsl.de.paramDefaults');
     }
   }
+  if (glsl.de.trapParam) {
+    const tp = deSig.params.find(p => p.name === glsl.de.trapParam);
+    if (!tp) throw new BundleError(`trapParam "${glsl.de.trapParam}" is not a parameter of ${deSig.name}`, 'glsl.de.trapParam');
+    if (tp.type !== 'vec4') throw new BundleError('trapParam must be a vec4 parameter', 'glsl.de.trapParam');
+    if (tp.qualifier === 'in' || tp.qualifier === 'const') {
+      throw new BundleError('trapParam must be an out or inout parameter', 'glsl.de.trapParam');
+    }
+  }
   if (glsl.de.scaleParam) {
     const sp = deSig.params.find(p => p.name === glsl.de.scaleParam);
     if (!sp) throw new BundleError(`scaleParam "${glsl.de.scaleParam}" is not a parameter of ${deSig.name}`, 'glsl.de.scaleParam');
@@ -164,11 +172,19 @@ export function validateBundle(raw) {
     matSig = parseSignature(glsl.material.signature, 'glsl.material.signature');
     if (matSig.returnType !== 'int') throw new BundleError('The material expression must return int', 'glsl.material.signature');
     const types = matSig.params.map(p => p.type).join(',');
-    if (types !== 'vec3,vec3' && types !== 'vec3') {
-      throw new BundleError('The material expression takes (vec3 p, vec3 n) or (vec3 p)', 'glsl.material.signature');
+    if (!['vec3', 'vec3,vec3', 'vec3,vec3,vec4'].includes(types)) {
+      throw new BundleError(
+        'The material expression takes (vec3 p), (vec3 p, vec3 n) or (vec3 p, vec3 n, vec4 trap)',
+        'glsl.material.signature');
     }
     lintGLSL(glsl.material.source, 'glsl.material.source');
     checkDeclares(glsl.material.source, matSig.name, 'glsl.material.source');
+  }
+
+  if (glsl.material && matSig.params.length === 3 && !glsl.de.trapParam) {
+    throw new BundleError(
+      'The material expression asks for a trap, so glsl.de.trapParam must name the estimator parameter that carries it',
+      'glsl.de.trapParam');
   }
 
   const uniforms = raw.uniforms || [];
@@ -185,10 +201,17 @@ export function validateBundle(raw) {
     }
     const ty = GLSL_TYPES[u.type];
     if (!ty) throw new BundleError(`Unsupported uniform type "${u.type}"`, path);
+    if (u.count !== undefined) {
+      if (!Number.isInteger(u.count) || u.count < 1) {
+        throw new BundleError('count must be a positive integer', path);
+      }
+    }
+    const want = ty.arity * (u.count || 1);
     const v = u.value;
     const arr = Array.isArray(v) ? v : [v];
-    if (arr.length !== ty.arity) {
-      throw new BundleError(`${u.type} needs ${ty.arity} component(s), found ${arr.length}`, path);
+    if (arr.length !== want) {
+      throw new BundleError(
+        `${u.type}${u.count ? `[${u.count}]` : ''} needs ${want} component(s), found ${arr.length}`, path);
     }
     for (const n of arr) {
       if (ty.kind === 'bool') { if (typeof n !== 'boolean' && n !== 0 && n !== 1) throw new BundleError('Expected a boolean', path); }
@@ -223,17 +246,20 @@ export function validateBundle(raw) {
         source: glsl.de.source,
         paramDefaults: { ...paramDefaults },
         scaleParam: glsl.de.scaleParam || null,
+        trapParam: glsl.de.trapParam || null,
       },
       material: glsl.material ? {
         name: matSig.name,
         signature: matSig.normalized,
         source: glsl.material.source,
-        wantsNormal: matSig.params.length === 2,
+        wantsNormal: matSig.params.length >= 2,
+        wantsTrap: matSig.params.length === 3,
       } : null,
     },
     uniforms: uniforms.map(u => ({
       name: u.name,
       type: u.type,
+      count: u.count || undefined,
       value: Array.isArray(u.value) ? u.value.slice() : u.value,
       label: u.label || u.name,
       min: u.min, max: u.max, step: u.step,
@@ -254,7 +280,9 @@ export function parseBundle(text) {
 
 /** GLSL uniform declarations for the bundle's uniform block. */
 export function uniformDeclarations(bundle) {
-  return bundle.uniforms.map(u => `uniform ${u.type} ${u.name};`).join('\n');
+  return bundle.uniforms
+    .map(u => `uniform ${u.type} ${u.name}${u.count ? `[${u.count}]` : ''};`)
+    .join('\n');
 }
 
 /**
@@ -266,27 +294,40 @@ export function uniformDeclarations(bundle) {
 export function deWrapper(bundle, fnName = 'fcField') {
   const de = bundle.glsl.de;
   const sig = bundle._sig || parseSignature(de.signature);
-  const lines = [];
+  const locals = [];
   const args = ['p'];
 
   for (const p of sig.params.slice(1)) {
     const init = de.paramDefaults[p.name] || TYPE_DEFAULTS[p.type];
-    lines.push(`  ${p.type} ${p.name} = ${init};`);
+    locals.push(`  ${p.type} ${p.name} = ${init};`);
     args.push(p.name);
   }
-  lines.push(`  float d = ${sig.name}(${args.join(', ')});`);
-  if (de.scaleParam) lines.push(`  d /= max(${de.scaleParam}, 1e-9);`);
-  lines.push(`  return d;`);
 
-  return `float ${fnName}(vec3 p) {\n${lines.join('\n')}\n}`;
+  const body = [
+    ...locals,
+    `  float d = ${sig.name}(${args.join(', ')});`,
+    de.scaleParam ? `  d /= max(${de.scaleParam}, 1e-9);` : null,
+  ].filter(Boolean);
+
+  // Two entry points from one body: the plain one is what the normal probe
+  // calls four times per cell, the trap one is called once and also hands back
+  // whatever the estimator accumulated, so orbit-trap colouring can drive
+  // material ids without paying for it on every probe.
+  const plain = `float ${fnName}(vec3 p) {\n${body.join('\n')}\n  return d;\n}`;
+  const trapAssign = de.trapParam ? `  fcTrapOut = ${de.trapParam};` : '  fcTrapOut = vec4(0.0);';
+  const withTrap = `float ${fnName}Trap(vec3 p, out vec4 fcTrapOut) {\n${body.join('\n')}\n${trapAssign}\n  return d;\n}`;
+
+  return `${plain}\n\n${withTrap}`;
 }
 
 /** The material call, defaulted to id 0 when the bundle does not supply one. */
 export function materialWrapper(bundle, fnName = 'fcMaterial') {
   const m = bundle.glsl.material;
-  if (!m) return `int ${fnName}(vec3 p, vec3 n) { return 0; }`;
-  const call = m.wantsNormal ? `${m.name}(p, n)` : `${m.name}(p)`;
-  return `int ${fnName}(vec3 p, vec3 n) { return ${call}; }`;
+  if (!m) return `int ${fnName}(vec3 p, vec3 n, vec4 trap) { return 0; }`;
+  const call = m.wantsTrap ? `${m.name}(p, n, trap)`
+    : m.wantsNormal ? `${m.name}(p, n)`
+      : `${m.name}(p)`;
+  return `int ${fnName}(vec3 p, vec3 n, vec4 trap) { return ${call}; }`;
 }
 
 /** Serialise a bundle back out (hosts can round-trip what Fieldcraft loaded). */
@@ -305,6 +346,7 @@ export function serializeBundle(bundle) {
         source: bundle.glsl.de.source,
         paramDefaults: Object.keys(bundle.glsl.de.paramDefaults).length ? bundle.glsl.de.paramDefaults : undefined,
         scaleParam: bundle.glsl.de.scaleParam || undefined,
+        trapParam: bundle.glsl.de.trapParam || undefined,
       },
       material: bundle.glsl.material ? {
         name: bundle.glsl.material.name,
@@ -313,7 +355,7 @@ export function serializeBundle(bundle) {
       } : undefined,
     },
     uniforms: bundle.uniforms.map(u => ({
-      name: u.name, type: u.type, value: u.value,
+      name: u.name, type: u.type, count: u.count || undefined, value: u.value,
       label: u.label !== u.name ? u.label : undefined,
       min: u.min, max: u.max, step: u.step,
     })),

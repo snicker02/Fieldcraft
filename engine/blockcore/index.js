@@ -11,7 +11,7 @@
 //   splitGrid        aligned chunking + placement guide
 //   buildMcPack      behaviour pack wrapper
 
-export const BLOCKCORE_VERSION = '0.1.0';
+export const BLOCKCORE_VERSION = '0.2.0';
 
 export {
   VoxelGrid, BudgetExceededError,
@@ -30,8 +30,8 @@ export { buildMcStructure, EMPTY_MODE, MAX_CELLS_PER_FILE } from './mcstructure.
 
 export { splitGrid, placementGuide, DEFAULT_CHUNK } from './split.js';
 
-export { buildMcPack, uuid4, sanitizeId } from './mcpack.js';
+export { buildMcPack, buildMcPackAsync, uuid4, sanitizeId } from './mcpack.js';
 
-export { ZipWriter, crc32 } from './zip.js';
+export { ZipWriter, crc32, deflateAvailable } from './zip.js';
 
 export { writeNBT, readNBT, T as NBT_TAG } from './nbt.js';

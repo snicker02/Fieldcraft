@@ -9,11 +9,11 @@ import { FieldSampler, SamplerError } from './engine/sampler.js';
 import { voxelizeSlab, MODE } from './engine/voxelize.js';
 import {
   VoxelGrid, BlockPalette, meshGrid, buildMcStructure, splitGrid,
-  placementGuide, buildMcPack, ZipWriter, sanitizeId, BLOCKCORE_VERSION,
+  placementGuide, buildMcPackAsync, ZipWriter, sanitizeId, BLOCKCORE_VERSION,
 } from './engine/blockcore/index.js';
 import { Preview } from './engine/preview.js';
 
-export const FIELDCRAFT_VERSION = '0.1.0';
+export const FIELDCRAFT_VERSION = '0.2.0';
 
 const $ = id => document.getElementById(id);
 const state = {
@@ -251,12 +251,12 @@ function buildPieces() {
   return { pieces, baseName, split };
 }
 
-function exportPack() {
+async function exportPack() {
   if (!state.grid) return;
   try {
     const { pieces, baseName, split } = buildPieces();
     const guide = placementGuide(split, { namespace: 'fieldcraft', baseName });
-    const pack = buildMcPack({
+    const pack = await buildMcPackAsync({
       name: `Fieldcraft — ${baseName}`,
       description: `${state.bundle.name}, ${state.grid.size.toLocaleString()} blocks, built with Fieldcraft ${FIELDCRAFT_VERSION}`,
       namespace: 'fieldcraft',
@@ -272,7 +272,7 @@ function exportPack() {
   }
 }
 
-function exportStructure() {
+async function exportStructure() {
   if (!state.grid) return;
   try {
     const { pieces, baseName, split } = buildPieces();
@@ -284,7 +284,7 @@ function exportStructure() {
     const zip = new ZipWriter();
     for (const p of pieces) zip.add(`${p.name}.mcstructure`, p.bytes);
     zip.add('placement-guide.txt', placementGuide(split, { namespace: 'fieldcraft', baseName }));
-    download(`${baseName}-v${FIELDCRAFT_VERSION}-pieces.zip`, zip.build(), 'application/zip');
+    download(`${baseName}-v${FIELDCRAFT_VERSION}-pieces.zip`, await zip.buildAsync(), 'application/zip');
     log(`Wrote ${pieces.length} pieces plus the placement guide.`, 'ok');
   } catch (e) {
     log(String(e.message || e), 'err');

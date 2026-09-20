@@ -66,5 +66,16 @@ export function buildMcPack(opts) {
   }
   for (const f of opts.extraFiles || []) zip.add(f.path, f.data);
 
-  return { bytes: zip.build(), manifest, paths, namespace };
+  return { bytes: zip.build(), manifest, paths, namespace, zip };
+}
+
+/**
+ * Same pack, deflated. A sparse structure is mostly the -1 that means "no
+ * block", and those runs compress by orders of magnitude, so this is the path
+ * the app actually uses.
+ * @returns {Promise<{bytes, manifest, paths, namespace}>}
+ */
+export async function buildMcPackAsync(opts) {
+  const built = buildMcPack(opts);
+  return { ...built, bytes: await built.zip.buildAsync() };
 }
