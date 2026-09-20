@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fieldcraft</title>
+<style>
+  :root {
+    --bg: #12151d;
+    --panel: #1a1f2a;
+    --panel-2: #212836;
+    --line: #2c3444;
+    --ink: #dfe4ec;
+    --ink-dim: #8d97a8;
+    --ink-faint: #616c7e;
+    --accent: #d7b169;
+    --accent-ink: #1a1405;
+    --cool: #6fb8c4;
+    --warn: #e08a6a;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 400 13px/1.5 var(--sans);
+    display: grid;
+    grid-template-columns: 330px 1fr;
+    grid-template-rows: 1fr auto;
+    overflow: hidden;
+  }
+
+  #panel {
+    grid-row: 1 / 3;
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+    padding: 14px 14px 28px;
+  }
+  #stage { position: relative; background: #0e1117; }
+  #view { width: 100%; height: 100%; display: block; touch-action: none; }
+
+  h1 {
+    font-size: 15px;
+    letter-spacing: 0.01em;
+    margin: 0 0 2px;
+    font-weight: 600;
+  }
+  h1 span { color: var(--ink-faint); font-weight: 400; font-family: var(--mono); font-size: 11px; margin-left: 6px; }
+  .blurb { color: var(--ink-dim); margin: 0 0 16px; font-size: 12px; }
+
+  fieldset { border: 0; border-top: 1px solid var(--line); margin: 0 0 14px; padding: 12px 0 0; }
+  legend { padding: 0 6px 0 0; color: var(--cool); font-size: 11px; letter-spacing: 0.04em; font-family: var(--mono); }
+
+  label { display: block; margin: 0 0 9px; }
+  .lbl { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 3px; }
+  .lbl b { font-weight: 500; color: var(--ink); }
+  .lbl i { font-style: normal; font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
+
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=number], input[type=text], select {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    border-radius: 4px;
+    padding: 5px 7px;
+    font: inherit;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  input[type=checkbox] { accent-color: var(--accent); margin-right: 6px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; min-width: 0; }
+
+  button {
+    width: 100%;
+    background: var(--panel-2);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--ink-faint); }
+  button:focus-visible { outline: 2px solid var(--cool); outline-offset: 1px; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button + button, .row + .row, .row + button, button + .row { margin-top: 7px; }
+
+  #uniforms:empty::after {
+    content: "This field has no parameters.";
+    color: var(--ink-faint);
+    font-size: 12px;
+  }
+
+  #status {
+    grid-column: 2;
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+    padding: 7px 14px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-dim);
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    align-items: center;
+    min-height: 32px;
+  }
+  #status b { color: var(--ink); font-weight: 500; }
+  #status .warn { color: var(--warn); }
+
+  #log {
+    margin-top: 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 170px;
+    overflow-y: auto;
+    background: #151a23;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 8px;
+  }
+  #log .err { color: var(--warn); }
+  #log .ok { color: var(--cool); }
+
+  #drop {
+    position: absolute;
+    inset: 0;
+    display: none;
+    place-items: center;
+    background: rgba(18, 21, 29, 0.88);
+    border: 2px dashed var(--accent);
+    color: var(--accent);
+    font-family: var(--mono);
+    z-index: 5;
+  }
+  body.dragging #drop { display: grid; }
+
+  .hint { color: var(--ink-faint); font-size: 11.5px; margin: -4px 0 10px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <h1>Fieldcraft <span id="buildStamp"></span></h1>
+  <p class="blurb">Distance fields to Bedrock structures.</p>
+
+  <fieldset>
+    <legend>field</legend>
+    <label>
+      <div class="lbl"><b>Source</b></div>
+      <select id="fieldSelect">
+        <option value="" id="customOption" disabled hidden>Loaded from file</option>
+        <option value="sphere">Built-in: sphere</option>
+        <option value="menger">Built-in: Menger sponge</option>
+      </select>
+    </label>
+    <div class="row">
+      <button id="loadBundle">Open bundle…</button>
+      <button id="saveBundle">Save bundle</button>
+    </div>
+    <input type="file" id="fileInput" accept=".json,.fieldbundle,.fieldbundle.json" class="hidden">
+    <p class="hint" id="fieldInfo"></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>parameters</legend>
+    <div id="uniforms"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>sampling</legend>
+    <label>
+      <div class="lbl"><b>Resolution</b><i id="resOut">256³</i></div>
+      <input type="range" id="res" min="32" max="512" step="16" value="256">
+    </label>
+    <label>
+      <div class="lbl"><b>Iso offset</b><i id="isoOut">0.000</i></div>
+      <input type="range" id="iso" min="-0.2" max="0.2" step="0.001" value="0">
+    </label>
+    <label>
+      <div class="lbl"><b>Cell budget</b></div>
+      <input type="number" id="budget" min="1000" step="100000" value="4000000">
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>blocks</legend>
+    <label>
+      <div class="lbl"><b>Fill</b></div>
+      <select id="mode">
+        <option value="solid">Solid</option>
+        <option value="shell">Hollow shell</option>
+      </select>
+    </label>
+    <label id="thickWrap">
+      <div class="lbl"><b>Shell thickness</b><i id="thickOut">2 cells</i></div>
+      <input type="range" id="thickness" min="1" max="16" step="1" value="2">
+    </label>
+    <label>
+      <div class="lbl"><b>Block names</b></div>
+      <select id="flattened">
+        <option value="1">Flattened (white_concrete)</option>
+        <option value="0">Legacy (concrete[color=white])</option>
+      </select>
+    </label>
+    <button id="build" class="primary">Build blocks</button>
+    <button id="cancel" disabled>Cancel</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>export</legend>
+    <label>
+      <div class="lbl"><b>Structure name</b></div>
+      <input type="text" id="name" value="field">
+    </label>
+    <label>
+      <div class="lbl"><b>Chunk size</b><i id="chunkOut">64³</i></div>
+      <input type="range" id="chunk" min="16" max="64" step="8" value="64">
+    </label>
+    <button id="exportPack" disabled>Export .mcpack</button>
+    <button id="exportStructure" disabled>Export .mcstructure</button>
+    <p class="hint">Structures over the practical size split into aligned pieces with a placement guide.</p>
+  </fieldset>
+
+  <div id="log"></div>
+</div>
+
+<div id="stage">
+  <canvas id="view"></canvas>
+  <div id="drop">Drop a field bundle</div>
+</div>
+
+<div id="status">
+  <span>cells <b id="sCells">—</b></span>
+  <span>faces <b id="sFaces">—</b></span>
+  <span>bounds <b id="sBounds">—</b></span>
+  <span>pieces <b id="sPieces">—</b></span>
+  <span id="sNote"></span>
+</div>
+
+<script type="module" src="./main.js"></script>
+</body>
+</html>

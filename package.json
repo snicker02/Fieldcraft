@@ -1,0 +1,10 @@
+{
+  "name": "fieldcraft",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Signed distance fields to Minecraft Bedrock structures",
+  "scripts": {
+    "validate": "node tools/validate.mjs"
+  }
+}
