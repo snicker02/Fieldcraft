@@ -186,3 +186,7 @@ Colour-space palette matching and the stair/slab surface detailer. Both are
 later passes over blockcore rather than changes to Fieldcraft, which is why the
 palette sits behind a single `blockFor()` call and the shade byte is already
 carried through the voxel value unused.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
